@@ -20,6 +20,11 @@ bot.catch((err) => {
   log.err(`Bot error: ${msg}`);
 });
 
+// Advertise bot commands
+void bot.api.setMyCommands([
+  { command: 'reset', description: 'Reset conversation context' }
+]);
+
 // Simple rolling memory per chat (stores Chat Completion message objects)
 const memory = new Map<number, Array<any>>();
 
@@ -79,18 +84,31 @@ bot.on('message:text', async (ctx) => {
   storeAssistantText(ctx, text);
 });
 
+// reset context
+bot.command('reset', async (ctx) => {
+  memory.delete(ctx.chat.id);
+  await ctx.reply('Context reset.');
+});
+
 // photo input
 bot.on('message:photo', async (ctx) => {
   log.info(`Photo from ${ctx.chat.id}`);
   if (!canRespond(ctx.chat.id)) return;
 
   try {
+    const isPM = ctx.chat.type === 'private';
+    const captionRaw = ctx.message.caption?.trim() || '';
+    const hasMention = captionRaw.includes(`@${ctx.me.username}`);
+    // In groups/supergroups, only respond if caption exists AND mentions the bot
+    if (!isPM) {
+      if (!captionRaw || !hasMention) return;
+    }
+
     const file = await ctx.api.getFile(ctx.message.photo.pop()!.file_id);
     const url = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
 
-    const caption = ctx.message.caption?.trim();
     const parts: any[] = [];
-    if (caption) parts.push({ type: 'text', text: caption });
+    if (captionRaw) parts.push({ type: 'text', text: captionRaw });
     parts.push({ type: 'image_url', image_url: { url } });
 
     // Store the image message in memory so future turns see it
@@ -101,7 +119,7 @@ bot.on('message:photo', async (ctx) => {
     const response = await askSkye(msgs);
     const text = cleanMd(response.choices[0].message.content || '');
 
-    await ctx.reply(text);
+    await ctx.reply(text, { reply_to_message_id: ctx.message.message_id });
     storeAssistantText(ctx, text);
   } catch (e: any) {
     log.err(`Image handler failed: ${e?.message || e}`);

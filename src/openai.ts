@@ -8,6 +8,6 @@ export async function askSkye(messages: any[]) {
   return client.chat.completions.create({
     model: 'openai/gpt-5.1',
     messages: messages,
-    max_completion_tokens: 1000
+    max_completion_tokens: 500
   });
 }
