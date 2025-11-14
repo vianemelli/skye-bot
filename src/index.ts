@@ -126,5 +126,5 @@ bot.on('message:photo', async (ctx) => {
   }
 });
 
-bot.start();
+bot.start({ drop_pending_updates: true});
 log.info('Skye is alive');
