@@ -1,4 +1,4 @@
-import { Bot, InputFile } from "grammy";
+import { Bot, InputFile, Context } from "grammy";
 import { BOT_TOKEN } from "./config.js";
 import { cleanMd } from "./utils/markdown.js";
 import {
@@ -9,7 +9,13 @@ import {
 } from "./openai.js";
 import { log } from "./utils/log.js";
 import { buildContext } from "./contextBuilder.js";
-import { SYSTEM } from "./prompt.js";
+import { buildSystemMessage } from "./prompt.js";
+import {
+  getMemories,
+  clearMemories,
+  memoryTools,
+  executeMemoryTool,
+} from "./memory.js";
 
 const bot = new Bot(BOT_TOKEN);
 
@@ -24,6 +30,7 @@ bot.catch((err) => {
 void bot.api.setMyCommands([
   { command: "image", description: "Generate an image from a text prompt" },
   { command: "reset", description: "Reset conversation context" },
+  { command: "forget", description: "Clear all saved memories for this chat" },
 ]);
 
 // Simple rolling memory per chat (stores Chat Completion message objects)
@@ -62,10 +69,61 @@ function canRespond(chatId: number) {
   return true;
 }
 
+/** Build a sender tag like [First Last (@username)] from ctx.from */
+function senderTag(ctx: Context): string {
+  const from = ctx.from;
+  if (!from) return "";
+  const parts: string[] = [];
+  if (from.first_name) parts.push(from.first_name);
+  if (from.last_name) parts.push(from.last_name);
+  const name = parts.join(" ") || "Unknown";
+  const handle = from.username ? ` (@${from.username})` : "";
+  return `[${name}${handle}] `;
+}
+
+/**
+ * Chat helper: builds system message with memories, runs the tool-calling loop,
+ * and returns the final text response.
+ */
+async function chat(chatId: number, messages: any[]): Promise<string> {
+  const memories = getMemories(chatId);
+  const systemMsg = buildSystemMessage(memories);
+  const msgs = [systemMsg, ...messages];
+
+  let response = await askSkye(msgs, memoryTools);
+  let choice = response.choices[0];
+
+  // Tool-calling loop (max 5 iterations to prevent runaway)
+  let iterations = 0;
+  while (choice?.message?.tool_calls?.length && iterations < 5) {
+    iterations++;
+    // Append the assistant message with tool calls
+    msgs.push(choice.message);
+
+    // Execute each tool call and append results
+    for (const tc of choice.message.tool_calls) {
+      if (tc.type !== "function") continue;
+      const result = executeMemoryTool(chatId, tc);
+      msgs.push({
+        role: "tool",
+        tool_call_id: tc.id,
+        content: result,
+      });
+    }
+
+    response = await askSkye(msgs, memoryTools);
+    choice = response.choices[0];
+  }
+
+  return choice?.message?.content || "";
+}
+
 // reset context
 bot.command("reset", async (ctx) => {
   memory.delete(ctx.chat.id);
-  await ctx.reply("Context reset.");
+  await ctx.reply(
+    "Context reset. Memories are still saved — use /forget to clear them.",
+  );
 });
 
 // image generation (text-only prompt)
@@ -113,6 +171,12 @@ bot.command("image", async (ctx) => {
   }
 });
 
+// Clear all saved memories for this chat
+bot.command("forget", async (ctx) => {
+  clearMemories(ctx.chat.id);
+  await ctx.reply("All memories cleared.");
+});
+
 bot.on("message:text", async (ctx) => {
   const isPM = ctx.chat.type === "private";
   const mention = ctx.message.text.includes(`@${ctx.me.username}`);
@@ -122,13 +186,16 @@ bot.on("message:text", async (ctx) => {
 
   log.info(`Incoming from ${ctx.chat.id}`);
 
-  const userMsg = { role: "user" as const, content: ctx.message.text || "" };
+  const tag = senderTag(ctx);
+  const userMsg = {
+    role: "user" as const,
+    content: tag + (ctx.message.text || ""),
+  };
   const history = memory.get(ctx.chat.id) || [];
-  const msgs = [SYSTEM, ...sanitizeContext(buildContext([...history, userMsg]))];
+  const context = sanitizeContext(buildContext([...history, userMsg]));
 
   try {
-    const response = await askSkye(msgs);
-    const text = cleanMd(response.choices[0]?.message?.content || "");
+    const text = cleanMd(await chat(ctx.chat.id, context));
 
     storeMessage(ctx.chat.id, userMsg);
     storeMessage(ctx.chat.id, { role: "assistant", content: text });
@@ -220,16 +287,17 @@ bot.on("message:photo", async (ctx) => {
     const file = await ctx.api.getFile(ctx.message.photo.pop()!.file_id);
     const url = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
 
+    const tag = senderTag(ctx);
     const parts: any[] = [];
-    if (captionRaw) parts.push({ type: "text", text: captionRaw });
+    if (captionRaw) parts.push({ type: "text", text: tag + captionRaw });
+    else if (tag) parts.push({ type: "text", text: tag.trim() });
     parts.push({ type: "image_url", image_url: { url } });
 
     const userMsg = { role: "user" as const, content: parts };
     const history = memory.get(ctx.chat.id) || [];
-    const msgs = [SYSTEM, ...buildContext([...history, userMsg])];
+    const context = buildContext([...history, userMsg]);
 
-    const response = await askSkye(msgs);
-    const text = cleanMd(response.choices[0]?.message?.content || "");
+    const text = cleanMd(await chat(ctx.chat.id, context));
 
     storeMessage(ctx.chat.id, userMsg);
     storeMessage(ctx.chat.id, { role: "assistant", content: text });

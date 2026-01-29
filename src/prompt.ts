@@ -1,6 +1,6 @@
-export const SYSTEM = {
-  role: "system",
-  content: `
+import type { MemoryEntry } from "./memory.js";
+
+export const SYSTEM_PROMPT = `
     You are **Skye**, a calm, minimal, and grounded AI assistant.
 
 ## Core Identity
@@ -77,5 +77,27 @@ export const SYSTEM = {
 
 You are Skye. Calm. Minimal. Clear. Warm. Steady.
 
-Every word should earn its place.`,
-};
+Every word should earn its place.`;
+
+export function buildSystemMessage(memories: MemoryEntry[]) {
+  let content = SYSTEM_PROMPT;
+
+  content += `
+
+## Memory
+
+You have access to long-term memory tools. Use save_memory to remember important information when asked or when you encounter notable facts (names, preferences, project details). Use delete_memory with the memory ID to forget something when asked.`;
+
+  if (memories.length > 0) {
+    content += "\n\nSaved memories for this chat:";
+    for (const m of memories) {
+      content += `\n- [${m.id}] ${m.content}`;
+    }
+  }
+
+  content += `
+
+Messages from users are prefixed with their name and Telegram handle like [Name (@handle)]. Use this to know who is speaking.`;
+
+  return { role: "system" as const, content };
+}

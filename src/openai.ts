@@ -12,12 +12,13 @@ export const client = new OpenAI({
   apiKey: OPENAI_KEY,
 });
 
-// Basic helper: send text + optional images
-export async function askSkye(messages: any[]) {
+// Basic helper: send text + optional images, with optional tool definitions
+export async function askSkye(messages: any[], tools?: any[]) {
   return client.chat.completions.create({
     model: MODEL,
-    messages: messages,
+    messages,
     max_completion_tokens: MAX_COMPLETION_TOKENS,
+    ...(tools?.length ? { tools } : {}),
   });
 }
 
