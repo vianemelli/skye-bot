@@ -39,6 +39,17 @@ export async function askSkye(messages: any[], tools?: any[], creds?: ApiCredent
   });
 }
 
+// Streaming variant — returns a ChatCompletionStream (async iterable with events).
+// Call .finalChatCompletion() to get the full ChatCompletion object once done.
+export function askSkyeStream(messages: any[], tools?: any[], creds?: ApiCredentials) {
+  return getClient(creds).chat.completions.stream({
+    model: MODEL,
+    messages,
+    max_completion_tokens: MAX_COMPLETION_TOKENS,
+    ...(tools?.length ? { tools } : {}),
+  });
+}
+
 // --- Model capability detection (via OpenRouter /models endpoint) ---
 
 let _supportsImages: boolean | null = null;

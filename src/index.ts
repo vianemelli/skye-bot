@@ -2,7 +2,7 @@ import { Bot, InputFile, Context, NextFunction } from "grammy";
 import { BOT_TOKEN, ALLOWED_IDS, BASE_URL } from "./config.js";
 import { cleanMd } from "./utils/markdown.js";
 import {
-  askSkye,
+  askSkyeStream,
   checkModelCapabilities,
   generateImage,
   modelSupportsImages,
@@ -52,12 +52,17 @@ void bot.api.setMyCommands([
   { command: "config", description: "Configure API credentials for this chat" },
 ]);
 
-// Simple rolling memory per chat (stores Chat Completion message objects)
-const memory = new Map<number, Array<any>>();
+// Composite key: "chatId" or "chatId:threadId" for per-thread state
+function threadKey(chatId: number, threadId?: number): string {
+  return threadId != null ? `${chatId}:${threadId}` : String(chatId);
+}
 
-function storeMessage(chatId: number, msg: any) {
-  if (!memory.has(chatId)) memory.set(chatId, []);
-  const list = memory.get(chatId)!;
+// Simple rolling memory per thread (stores Chat Completion message objects)
+const memory = new Map<string, Array<any>>();
+
+function storeMessage(key: string, msg: any) {
+  if (!memory.has(key)) memory.set(key, []);
+  const list = memory.get(key)!;
   list.push(msg);
   if (list.length > 15) list.shift();
 }
@@ -78,13 +83,13 @@ function sanitizeContext(messages: any[]): any[] {
   });
 }
 
-// Rate limiting (very light): 1 request per 2s per chat
-const lastCall = new Map<number, number>();
-function canRespond(chatId: number) {
+// Rate limiting (very light): 1 request per 2s per thread
+const lastCall = new Map<string, number>();
+function canRespond(key: string) {
   const now = Date.now();
-  const prev = lastCall.get(chatId) ?? 0;
+  const prev = lastCall.get(key) ?? 0;
   if (now - prev < 2000) return false;
-  lastCall.set(chatId, now);
+  lastCall.set(key, now);
   return true;
 }
 
@@ -170,48 +175,51 @@ bot.use(accessGate);
 
 /**
  * Chat helper: builds system message with memories, runs the tool-calling loop,
- * and returns the final text response.
+ * and returns the final text response.  Supports streaming via optional onChunk
+ * callback that receives the accumulated text snapshot on each content delta.
  */
 async function chat(
   chatId: number,
   messages: any[],
   creds?: ApiCredentials,
+  onChunk?: (snapshot: string) => void,
 ): Promise<string> {
   const memories = getMemories(chatId);
   const systemMsg = buildSystemMessage(memories);
   const msgs = [systemMsg, ...messages];
 
-  let response = await askSkye(msgs, memoryTools, creds);
-  let choice = response.choices[0];
-
-  // Tool-calling loop (max 5 iterations to prevent runaway)
   let iterations = 0;
-  while (choice?.message?.tool_calls?.length && iterations < 5) {
-    iterations++;
-    // Append the assistant message with tool calls
-    msgs.push(choice.message);
+  while (iterations <= 5) {
+    const stream = askSkyeStream(msgs, memoryTools, creds);
 
-    // Execute each tool call and append results
+    // Only wire up streaming for the content phase (not tool-call iterations)
+    if (onChunk) {
+      stream.on("content", (_delta, snapshot) => onChunk(snapshot));
+    }
+
+    const completion = await stream.finalChatCompletion();
+    const choice = completion.choices[0];
+
+    if (!choice?.message?.tool_calls?.length) {
+      return choice?.message?.content || "";
+    }
+
+    // Tool calls — process and loop
+    msgs.push(choice.message);
     for (const tc of choice.message.tool_calls) {
       if (tc.type !== "function") continue;
       const result = executeMemoryTool(chatId, tc);
-      msgs.push({
-        role: "tool",
-        tool_call_id: tc.id,
-        content: result,
-      });
+      msgs.push({ role: "tool", tool_call_id: tc.id, content: result });
     }
-
-    response = await askSkye(msgs, memoryTools, creds);
-    choice = response.choices[0];
+    iterations++;
   }
-
-  return choice?.message?.content || "";
+  return "";
 }
 
-// reset context
+// reset context (per-thread)
 bot.command("reset", async (ctx) => {
-  memory.delete(ctx.chat.id);
+  const tk = threadKey(ctx.chat.id, ctx.message?.message_thread_id);
+  memory.delete(tk);
   await ctx.reply(
     "Context reset. Memories are still saved — use /forget to clear them.",
   );
@@ -227,7 +235,8 @@ bot.command("image", async (ctx) => {
     return;
   }
 
-  if (!canRespond(ctx.chat.id)) return;
+  const tk = threadKey(ctx.chat.id, ctx.message?.message_thread_id);
+  if (!canRespond(tk)) return;
 
   const creds = getCredentials(ctx.chat.id);
   log.info(`Image generation from ${ctx.chat.id}: ${prompt}`);
@@ -277,7 +286,9 @@ bot.on("message:text", async (ctx) => {
   const mention = ctx.message.text.includes(`@${ctx.me.username}`);
 
   if (!isPM && !mention) return; // groups: only when tagged
-  if (!canRespond(ctx.chat.id)) return;
+
+  const tk = threadKey(ctx.chat.id, ctx.message?.message_thread_id);
+  if (!canRespond(tk)) return;
 
   log.info(`Incoming from ${ctx.chat.id}`);
 
@@ -287,14 +298,23 @@ bot.on("message:text", async (ctx) => {
     role: "user" as const,
     content: tag + (ctx.message.text || ""),
   };
-  const history = memory.get(ctx.chat.id) || [];
+  const history = memory.get(tk) || [];
   const context = sanitizeContext(buildContext([...history, userMsg]));
 
-  try {
-    const text = cleanMd(await chat(ctx.chat.id, context, creds));
+  // Throttled streaming draft sender
+  let lastDraft = 0;
+  const onChunk = (snapshot: string) => {
+    const now = Date.now();
+    if (now - lastDraft < 300) return;
+    lastDraft = now;
+    (ctx as any).replyWithDraft?.(snapshot)?.catch(() => {});
+  };
 
-    storeMessage(ctx.chat.id, userMsg);
-    storeMessage(ctx.chat.id, { role: "assistant", content: text });
+  try {
+    const text = cleanMd(await chat(ctx.chat.id, context, creds, onChunk));
+
+    storeMessage(tk, userMsg);
+    storeMessage(tk, { role: "assistant", content: text });
 
     await ctx.reply(text, { reply_to_message_id: ctx.message.message_id });
   } catch (e: any) {
@@ -315,6 +335,8 @@ bot.on("message:photo", async (ctx) => {
   const captionRaw = ctx.message.caption?.trim() || "";
   const imageMatch = captionRaw.match(IMAGE_CMD_RE);
 
+  const tk = threadKey(ctx.chat.id, ctx.message?.message_thread_id);
+
   // --- Path 1: /image command with photo → image editing ---
   if (imageMatch) {
     const prompt = imageMatch[1].trim();
@@ -326,7 +348,7 @@ bot.on("message:photo", async (ctx) => {
       return;
     }
 
-    if (!canRespond(ctx.chat.id)) return;
+    if (!canRespond(tk)) return;
 
     const creds = getCredentials(ctx.chat.id);
     log.info(`Image editing from ${ctx.chat.id}: ${prompt}`);
@@ -377,10 +399,19 @@ bot.on("message:photo", async (ctx) => {
     return;
   }
 
-  if (!canRespond(ctx.chat.id)) return;
+  if (!canRespond(tk)) return;
 
   const creds = getCredentials(ctx.chat.id);
   log.info(`Photo from ${ctx.chat.id}`);
+
+  // Throttled streaming draft sender
+  let lastDraft = 0;
+  const onChunk = (snapshot: string) => {
+    const now = Date.now();
+    if (now - lastDraft < 300) return;
+    lastDraft = now;
+    (ctx as any).replyWithDraft?.(snapshot)?.catch(() => {});
+  };
 
   try {
     const file = await ctx.api.getFile(ctx.message.photo.pop()!.file_id);
@@ -394,13 +425,13 @@ bot.on("message:photo", async (ctx) => {
     parts.push({ type: "image_url", image_url: { url: dataUrl } });
 
     const userMsg = { role: "user" as const, content: parts };
-    const history = memory.get(ctx.chat.id) || [];
+    const history = memory.get(tk) || [];
     const context = buildContext([...history, userMsg]);
 
-    const text = cleanMd(await chat(ctx.chat.id, context, creds));
+    const text = cleanMd(await chat(ctx.chat.id, context, creds, onChunk));
 
-    storeMessage(ctx.chat.id, userMsg);
-    storeMessage(ctx.chat.id, { role: "assistant", content: text });
+    storeMessage(tk, userMsg);
+    storeMessage(tk, { role: "assistant", content: text });
 
     await ctx.reply(text, { reply_to_message_id: ctx.message.message_id });
   } catch (e: any) {

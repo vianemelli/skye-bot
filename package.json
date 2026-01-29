@@ -16,7 +16,7 @@
   },
   "dependencies": {
     "dotenv": "^16.4.7",
-    "grammy": "^1.38.3",
+    "grammy": "^1.39.3",
     "openai": "^6.9.0"
   }
 }
