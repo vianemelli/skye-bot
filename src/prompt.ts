@@ -79,8 +79,30 @@ You are Skye. Calm. Minimal. Clear. Warm. Steady.
 
 Every word should earn its place.`;
 
-export function buildSystemMessage(memories: MemoryEntry[]) {
+export interface ChatContext {
+  chatTitle: string;
+  summary: string;
+  recentLog: string;
+}
+
+export function buildSystemMessage(
+  memories: MemoryEntry[],
+  chatContext?: ChatContext,
+) {
   let content = SYSTEM_PROMPT;
+
+  if (chatContext) {
+    const date = new Date().toLocaleDateString("en-US", {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    });
+    content += `\n\n## Chat Context\n\nChat: "${chatContext.chatTitle}"\nDate: ${date}`;
+    if (chatContext.summary) {
+      content += `\n\nOlder conversation summary:\n${chatContext.summary}`;
+    }
+    content += `\n\nRecent messages:\n${chatContext.recentLog}`;
+  }
 
   content += `
 

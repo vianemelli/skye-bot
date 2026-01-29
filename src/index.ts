@@ -23,6 +23,12 @@ import {
   handleWizardInput,
   isInWizard,
 } from "./configCommand.js";
+import {
+  logMessage,
+  getChatContext,
+  summarizeChat,
+  type LogEntry,
+} from "./chatLog.js";
 
 const bot = new Bot(BOT_TOKEN);
 
@@ -124,6 +130,67 @@ function senderTag(ctx: Context): string {
   return `[${name}${handle}] `;
 }
 
+/** Extract a LogEntry from any message context */
+function extractLogEntry(ctx: Context): LogEntry {
+  const from = ctx.from;
+  const nameParts: string[] = [];
+  if (from?.first_name) nameParts.push(from.first_name);
+  if (from?.last_name) nameParts.push(from.last_name);
+  const sender = nameParts.join(" ") || "Unknown";
+
+  const now = new Date();
+  const timestamp = now.toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+
+  const msg = ctx.message!;
+  let type = "text";
+  let content = "";
+
+  if ("text" in msg && msg.text) {
+    content = msg.text;
+  } else if ("sticker" in msg && msg.sticker) {
+    type = "sticker";
+    content = msg.sticker.emoji || "sticker";
+  } else if ("photo" in msg && msg.photo) {
+    type = "photo";
+    content = ("caption" in msg && msg.caption) || "photo";
+  } else if ("video" in msg && msg.video) {
+    type = "video";
+    content = ("caption" in msg && msg.caption) || "video";
+  } else if ("animation" in msg && msg.animation) {
+    type = "GIF";
+    content = ("caption" in msg && msg.caption) || "GIF";
+  } else if ("document" in msg && msg.document) {
+    type = "document";
+    content = msg.document.file_name || "document";
+  } else if ("voice" in msg && msg.voice) {
+    type = "voice";
+    content = "voice message";
+  } else if ("video_note" in msg && msg.video_note) {
+    type = "video_note";
+    content = "video note";
+  } else if ("audio" in msg && msg.audio) {
+    type = "audio";
+    content = msg.audio.title || msg.audio.file_name || "audio";
+  } else {
+    content = "[unsupported message type]";
+  }
+
+  let replyTo: string | undefined;
+  if ("reply_to_message" in msg && msg.reply_to_message?.from) {
+    const rf = msg.reply_to_message.from;
+    const rParts: string[] = [];
+    if (rf.first_name) rParts.push(rf.first_name);
+    if (rf.last_name) rParts.push(rf.last_name);
+    replyTo = rParts.join(" ") || "Unknown";
+  }
+
+  return { sender, timestamp, type, content, replyTo };
+}
+
 // --- Access control helpers ---
 
 function getCredentials(chatId: number): ApiCredentials | undefined {
@@ -190,6 +257,17 @@ async function accessGate(ctx: Context, next: NextFunction) {
 
 bot.use(accessGate);
 
+// 2b. Chat logging middleware (groups only)
+bot.on("message", async (ctx, next) => {
+  if (ctx.chat?.type === "group" || ctx.chat?.type === "supergroup") {
+    const entry = extractLogEntry(ctx);
+    if (logMessage(ctx.chat.id, entry, ctx.chat.title)) {
+      void summarizeChat(ctx.chat.id, getCredentials(ctx.chat.id));
+    }
+  }
+  return next();
+});
+
 // 3. Commands and message handlers
 
 /**
@@ -204,7 +282,8 @@ async function chat(
   onChunk?: (snapshot: string) => void,
 ): Promise<string> {
   const memories = getMemories(chatId);
-  const systemMsg = buildSystemMessage(memories);
+  const chatContext = getChatContext(chatId);
+  const systemMsg = buildSystemMessage(memories, chatContext);
   const msgs = [systemMsg, ...messages];
 
   let iterations = 0;
