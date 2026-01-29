@@ -19,6 +19,15 @@ import {
 
 const bot = new Bot(BOT_TOKEN);
 
+/** Download an image from a URL and return it as a base64 data URL. */
+async function toDataUrl(url: string): Promise<string> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Failed to download image: ${res.status}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  const mime = res.headers.get("content-type") || "image/jpeg";
+  return `data:${mime};base64,${buf.toString("base64")}`;
+}
+
 // Global error handler to prevent crashes
 bot.catch((err) => {
   const msg =
@@ -242,7 +251,8 @@ bot.on("message:photo", async (ctx) => {
       await ctx.api.sendChatAction(ctx.chat.id, "upload_photo");
       const file = await ctx.api.getFile(ctx.message.photo.pop()!.file_id);
       const photoUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
-      const buffer = await generateImage(prompt, photoUrl);
+      const dataUrl = await toDataUrl(photoUrl);
+      const buffer = await generateImage(prompt, dataUrl);
 
       if (!buffer) {
         await ctx.reply("No image was generated. Try a different prompt.", {
@@ -285,13 +295,14 @@ bot.on("message:photo", async (ctx) => {
 
   try {
     const file = await ctx.api.getFile(ctx.message.photo.pop()!.file_id);
-    const url = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
+    const telegramUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
+    const dataUrl = await toDataUrl(telegramUrl);
 
     const tag = senderTag(ctx);
     const parts: any[] = [];
     if (captionRaw) parts.push({ type: "text", text: tag + captionRaw });
     else if (tag) parts.push({ type: "text", text: tag.trim() });
-    parts.push({ type: "image_url", image_url: { url } });
+    parts.push({ type: "image_url", image_url: { url: dataUrl } });
 
     const userMsg = { role: "user" as const, content: parts };
     const history = memory.get(ctx.chat.id) || [];
