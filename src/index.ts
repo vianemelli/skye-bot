@@ -1,11 +1,12 @@
-import { Bot, InputFile, Context } from "grammy";
-import { BOT_TOKEN } from "./config.js";
+import { Bot, InputFile, Context, NextFunction } from "grammy";
+import { BOT_TOKEN, ALLOWED_IDS, BASE_URL } from "./config.js";
 import { cleanMd } from "./utils/markdown.js";
 import {
   askSkye,
   checkModelCapabilities,
   generateImage,
   modelSupportsImages,
+  ApiCredentials,
 } from "./openai.js";
 import { log } from "./utils/log.js";
 import { buildContext } from "./contextBuilder.js";
@@ -16,8 +17,16 @@ import {
   memoryTools,
   executeMemoryTool,
 } from "./memory.js";
+import { getChatConfig } from "./chatConfig.js";
+import {
+  registerConfigHandlers,
+  handleWizardInput,
+  isInWizard,
+} from "./configCommand.js";
 
 const bot = new Bot(BOT_TOKEN);
+
+const OUR_COMMANDS = new Set(["image", "reset", "forget", "config"]);
 
 /** Download an image from a URL and return it as a base64 data URL. */
 async function toDataUrl(url: string): Promise<string> {
@@ -40,6 +49,7 @@ void bot.api.setMyCommands([
   { command: "image", description: "Generate an image from a text prompt" },
   { command: "reset", description: "Reset conversation context" },
   { command: "forget", description: "Clear all saved memories for this chat" },
+  { command: "config", description: "Configure API credentials for this chat" },
 ]);
 
 // Simple rolling memory per chat (stores Chat Completion message objects)
@@ -90,16 +100,88 @@ function senderTag(ctx: Context): string {
   return `[${name}${handle}] `;
 }
 
+// --- Access control helpers ---
+
+function getCredentials(chatId: number): ApiCredentials | undefined {
+  if (ALLOWED_IDS.has(chatId)) return undefined; // use global
+  const cfg = getChatConfig(chatId);
+  if (!cfg.apiKey) return undefined;
+  return {
+    apiKey: cfg.apiKey,
+    baseUrl: cfg.baseUrl ?? BASE_URL,
+  };
+}
+
+function hasAccess(chatId: number): boolean {
+  if (ALLOWED_IDS.has(chatId)) return true;
+  return !!getChatConfig(chatId).apiKey;
+}
+
+// --- Handler registration order matters ---
+
+// 1. Config handlers (always accessible)
+registerConfigHandlers(bot);
+
+// 2. Access gate middleware
+async function accessGate(ctx: Context, next: NextFunction) {
+  const chatId = ctx.chat?.id;
+  if (!chatId) return next();
+
+  // Always allow /config and wizard interactions
+  if (ctx.callbackQuery?.data?.startsWith("cfg:")) return next();
+  if (isInWizard(chatId)) return next();
+
+  const isGroup = ctx.chat?.type === "group" || ctx.chat?.type === "supergroup";
+  const botUsername = ctx.me?.username ?? "";
+  const text = ctx.message?.text ?? ctx.message?.caption ?? "";
+
+  // Check if this is a command directed at our bot
+  const cmdMatch = text.match(/^\/(\w+)(?:@(\S+))?/);
+  const isOurCommand = cmdMatch
+    ? OUR_COMMANDS.has(cmdMatch[1]) && (!cmdMatch[2] || cmdMatch[2] === botUsername)
+    : false;
+
+  // In groups, ignore commands addressed to other bots entirely
+  if (isGroup && cmdMatch && !isOurCommand) return;
+
+  // /config always passes through
+  if (isOurCommand && cmdMatch![1] === "config") return next();
+
+  if (!hasAccess(chatId)) {
+    const isMention = botUsername ? text.includes(`@${botUsername}`) : false;
+
+    // In groups, only respond when directly @mentioned or our command is used
+    const isDirected = !isGroup || isMention || isOurCommand;
+
+    if (isDirected) {
+      await ctx.reply(
+        "You need to provide an API key to use this bot. Use /config to set one up.",
+      );
+    }
+    return;
+  }
+
+  return next();
+}
+
+bot.use(accessGate);
+
+// 3. Commands and message handlers
+
 /**
  * Chat helper: builds system message with memories, runs the tool-calling loop,
  * and returns the final text response.
  */
-async function chat(chatId: number, messages: any[]): Promise<string> {
+async function chat(
+  chatId: number,
+  messages: any[],
+  creds?: ApiCredentials,
+): Promise<string> {
   const memories = getMemories(chatId);
   const systemMsg = buildSystemMessage(memories);
   const msgs = [systemMsg, ...messages];
 
-  let response = await askSkye(msgs, memoryTools);
+  let response = await askSkye(msgs, memoryTools, creds);
   let choice = response.choices[0];
 
   // Tool-calling loop (max 5 iterations to prevent runaway)
@@ -120,7 +202,7 @@ async function chat(chatId: number, messages: any[]): Promise<string> {
       });
     }
 
-    response = await askSkye(msgs, memoryTools);
+    response = await askSkye(msgs, memoryTools, creds);
     choice = response.choices[0];
   }
 
@@ -147,6 +229,7 @@ bot.command("image", async (ctx) => {
 
   if (!canRespond(ctx.chat.id)) return;
 
+  const creds = getCredentials(ctx.chat.id);
   log.info(`Image generation from ${ctx.chat.id}: ${prompt}`);
 
   // Keep the "uploading photo" indicator visible while generating
@@ -156,7 +239,7 @@ bot.command("image", async (ctx) => {
 
   try {
     await ctx.api.sendChatAction(ctx.chat.id, "upload_photo");
-    const buffer = await generateImage(prompt);
+    const buffer = await generateImage(prompt, undefined, creds);
 
     if (!buffer) {
       await ctx.reply("No image was generated. Try a different prompt.", {
@@ -187,6 +270,9 @@ bot.command("forget", async (ctx) => {
 });
 
 bot.on("message:text", async (ctx) => {
+  // Wizard input interception — short-circuit before normal handling
+  if (await handleWizardInput(ctx)) return;
+
   const isPM = ctx.chat.type === "private";
   const mention = ctx.message.text.includes(`@${ctx.me.username}`);
 
@@ -195,6 +281,7 @@ bot.on("message:text", async (ctx) => {
 
   log.info(`Incoming from ${ctx.chat.id}`);
 
+  const creds = getCredentials(ctx.chat.id);
   const tag = senderTag(ctx);
   const userMsg = {
     role: "user" as const,
@@ -204,7 +291,7 @@ bot.on("message:text", async (ctx) => {
   const context = sanitizeContext(buildContext([...history, userMsg]));
 
   try {
-    const text = cleanMd(await chat(ctx.chat.id, context));
+    const text = cleanMd(await chat(ctx.chat.id, context, creds));
 
     storeMessage(ctx.chat.id, userMsg);
     storeMessage(ctx.chat.id, { role: "assistant", content: text });
@@ -241,6 +328,7 @@ bot.on("message:photo", async (ctx) => {
 
     if (!canRespond(ctx.chat.id)) return;
 
+    const creds = getCredentials(ctx.chat.id);
     log.info(`Image editing from ${ctx.chat.id}: ${prompt}`);
 
     const actionInterval = setInterval(() => {
@@ -252,7 +340,7 @@ bot.on("message:photo", async (ctx) => {
       const file = await ctx.api.getFile(ctx.message.photo.pop()!.file_id);
       const photoUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
       const dataUrl = await toDataUrl(photoUrl);
-      const buffer = await generateImage(prompt, dataUrl);
+      const buffer = await generateImage(prompt, dataUrl, creds);
 
       if (!buffer) {
         await ctx.reply("No image was generated. Try a different prompt.", {
@@ -291,6 +379,7 @@ bot.on("message:photo", async (ctx) => {
 
   if (!canRespond(ctx.chat.id)) return;
 
+  const creds = getCredentials(ctx.chat.id);
   log.info(`Photo from ${ctx.chat.id}`);
 
   try {
@@ -308,7 +397,7 @@ bot.on("message:photo", async (ctx) => {
     const history = memory.get(ctx.chat.id) || [];
     const context = buildContext([...history, userMsg]);
 
-    const text = cleanMd(await chat(ctx.chat.id, context));
+    const text = cleanMd(await chat(ctx.chat.id, context, creds));
 
     storeMessage(ctx.chat.id, userMsg);
     storeMessage(ctx.chat.id, { role: "assistant", content: text });

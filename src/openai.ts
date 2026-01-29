@@ -7,14 +7,31 @@ import {
 } from "./config.js";
 import { log } from "./utils/log.js";
 
-export const client = new OpenAI({
+export interface ApiCredentials {
+  apiKey: string;
+  baseUrl: string;
+}
+
+const globalClient = new OpenAI({
   baseURL: BASE_URL,
   apiKey: OPENAI_KEY,
 });
 
+function getClient(creds?: ApiCredentials): OpenAI {
+  if (!creds) return globalClient;
+  return new OpenAI({ baseURL: creds.baseUrl, apiKey: creds.apiKey });
+}
+
+function resolveCredentials(creds?: ApiCredentials): { apiKey: string; baseUrl: string } {
+  return {
+    apiKey: creds?.apiKey ?? OPENAI_KEY,
+    baseUrl: creds?.baseUrl ?? BASE_URL,
+  };
+}
+
 // Basic helper: send text + optional images, with optional tool definitions
-export async function askSkye(messages: any[], tools?: any[]) {
-  return client.chat.completions.create({
+export async function askSkye(messages: any[], tools?: any[], creds?: ApiCredentials) {
+  return getClient(creds).chat.completions.create({
     model: MODEL,
     messages,
     max_completion_tokens: MAX_COMPLETION_TOKENS,
@@ -58,7 +75,9 @@ export function modelSupportsImages(): boolean | null {
 
 const IMAGE_MODEL = "google/gemini-3-pro-image-preview";
 
-export async function generateImage(prompt: string, imageUrl?: string): Promise<Buffer | null> {
+export async function generateImage(prompt: string, imageUrl?: string, creds?: ApiCredentials): Promise<Buffer | null> {
+  const { apiKey, baseUrl } = resolveCredentials(creds);
+
   const content: any = imageUrl
     ? [
         { type: "text", text: prompt },
@@ -66,10 +85,10 @@ export async function generateImage(prompt: string, imageUrl?: string): Promise<
       ]
     : prompt;
 
-  const res = await fetch(`${BASE_URL}/chat/completions`, {
+  const res = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${OPENAI_KEY}`,
+      Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
