@@ -77,7 +77,7 @@ export function registerConfigHandlers(bot: Bot): void {
         break;
       }
       case "cfg:reset_key": {
-        resetChatApiKey(chatId);
+        await resetChatApiKey(chatId);
         await ctx.answerCallbackQuery("API key reset.");
         const { text, keyboard } = buildPanel(chatId);
         await ctx.editMessageText(text, {
@@ -87,7 +87,7 @@ export function registerConfigHandlers(bot: Bot): void {
         break;
       }
       case "cfg:reset_url": {
-        resetChatBaseUrl(chatId);
+        await resetChatBaseUrl(chatId);
         await ctx.answerCallbackQuery("Base URL reset.");
         const { text, keyboard } = buildPanel(chatId);
         await ctx.editMessageText(text, {
@@ -127,9 +127,9 @@ export async function handleWizardInput(ctx: Context): Promise<boolean> {
   wizardState.delete(chatId);
 
   if (state === "api_key") {
-    setChatApiKey(chatId, text);
+    await setChatApiKey(chatId, text);
   } else {
-    setChatBaseUrl(chatId, text);
+    await setChatBaseUrl(chatId, text);
   }
 
   const { text: panelText, keyboard } = buildPanel(chatId);

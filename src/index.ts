@@ -33,7 +33,26 @@ async function toDataUrl(url: string): Promise<string> {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Failed to download image: ${res.status}`);
   const buf = Buffer.from(await res.arrayBuffer());
-  const mime = res.headers.get("content-type") || "image/jpeg";
+
+  // Derive MIME from file extension – Telegram's content-type header can be
+  // unreliable (e.g. application/octet-stream) or include parameters that
+  // break the data-URL format (e.g. "image/jpeg; charset=utf-8").
+  const MIME_MAP: Record<string, string> = {
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    png: "image/png",
+    webp: "image/webp",
+    gif: "image/gif",
+  };
+  const ext = url.split(/[?#]/)[0].split(".").pop()?.toLowerCase() || "";
+  const headerMime = (res.headers.get("content-type") || "")
+    .split(";")[0]
+    .trim();
+  const mime =
+    MIME_MAP[ext] ||
+    (headerMime.startsWith("image/") ? headerMime : null) ||
+    "image/jpeg";
+
   return `data:${mime};base64,${buf.toString("base64")}`;
 }
 
@@ -208,7 +227,7 @@ async function chat(
     msgs.push(choice.message);
     for (const tc of choice.message.tool_calls) {
       if (tc.type !== "function") continue;
-      const result = executeMemoryTool(chatId, tc);
+      const result = await executeMemoryTool(chatId, tc);
       msgs.push({ role: "tool", tool_call_id: tc.id, content: result });
     }
     iterations++;
@@ -239,42 +258,45 @@ bot.command("image", async (ctx) => {
   if (!canRespond(tk)) return;
 
   const creds = getCredentials(ctx.chat.id);
-  log.info(`Image generation from ${ctx.chat.id}: ${prompt}`);
 
-  // Keep the "uploading photo" indicator visible while generating
-  const actionInterval = setInterval(() => {
-    ctx.api.sendChatAction(ctx.chat.id, "upload_photo").catch(() => {});
-  }, 4000);
+  void (async () => {
+    log.info(`Image generation from ${ctx.chat.id}: ${prompt}`);
 
-  try {
-    await ctx.api.sendChatAction(ctx.chat.id, "upload_photo");
-    const buffer = await generateImage(prompt, undefined, creds);
+    // Keep the "uploading photo" indicator visible while generating
+    const actionInterval = setInterval(() => {
+      ctx.api.sendChatAction(ctx.chat.id, "upload_photo").catch(() => {});
+    }, 4000);
 
-    if (!buffer) {
-      await ctx.reply("No image was generated. Try a different prompt.", {
+    try {
+      await ctx.api.sendChatAction(ctx.chat.id, "upload_photo");
+      const buffer = await generateImage(prompt, undefined, creds);
+
+      if (!buffer) {
+        await ctx.reply("No image was generated. Try a different prompt.", {
+          reply_to_message_id: ctx.message!.message_id,
+        });
+        return;
+      }
+
+      await ctx.replyWithPhoto(new InputFile(buffer, "image.png"), {
         reply_to_message_id: ctx.message!.message_id,
       });
-      return;
+    } catch (e: any) {
+      log.err(`Image generation failed: ${e?.message || e}`);
+      await ctx
+        .reply("Failed to generate the image. Please try again.", {
+          reply_to_message_id: ctx.message!.message_id,
+        })
+        .catch(() => {});
+    } finally {
+      clearInterval(actionInterval);
     }
-
-    await ctx.replyWithPhoto(new InputFile(buffer, "image.png"), {
-      reply_to_message_id: ctx.message!.message_id,
-    });
-  } catch (e: any) {
-    log.err(`Image generation failed: ${e?.message || e}`);
-    await ctx
-      .reply("Failed to generate the image. Please try again.", {
-        reply_to_message_id: ctx.message!.message_id,
-      })
-      .catch(() => {});
-  } finally {
-    clearInterval(actionInterval);
-  }
+  })();
 });
 
 // Clear all saved memories for this chat
 bot.command("forget", async (ctx) => {
-  clearMemories(ctx.chat.id);
+  await clearMemories(ctx.chat.id);
   await ctx.reply("All memories cleared.");
 });
 
@@ -290,41 +312,50 @@ bot.on("message:text", async (ctx) => {
   const tk = threadKey(ctx.chat.id, ctx.message?.message_thread_id);
   if (!canRespond(tk)) return;
 
-  log.info(`Incoming from ${ctx.chat.id}`);
+  void (async () => {
+    log.info(`Incoming from ${ctx.chat.id}`);
 
-  const creds = getCredentials(ctx.chat.id);
-  const tag = senderTag(ctx);
-  const userMsg = {
-    role: "user" as const,
-    content: tag + (ctx.message.text || ""),
-  };
-  const history = memory.get(tk) || [];
-  const context = sanitizeContext(buildContext([...history, userMsg]));
+    const creds = getCredentials(ctx.chat.id);
+    const tag = senderTag(ctx);
+    const userMsg = {
+      role: "user" as const,
+      content: tag + (ctx.message.text || ""),
+    };
+    const history = memory.get(tk) || [];
+    const context = sanitizeContext(buildContext([...history, userMsg]));
 
-  // Throttled streaming draft sender
-  let lastDraft = 0;
-  const onChunk = (snapshot: string) => {
-    const now = Date.now();
-    if (now - lastDraft < 300) return;
-    lastDraft = now;
-    (ctx as any).replyWithDraft?.(snapshot)?.catch(() => {});
-  };
+    // Throttled streaming draft sender
+    let lastDraft = 0;
+    const onChunk = (snapshot: string) => {
+      const now = Date.now();
+      if (now - lastDraft < 300) return;
+      lastDraft = now;
+      (ctx as any).replyWithDraft?.(snapshot)?.catch(() => {});
+    };
 
-  try {
-    const text = cleanMd(await chat(ctx.chat.id, context, creds, onChunk));
+    try {
+      const text = cleanMd(await chat(ctx.chat.id, context, creds, onChunk));
 
-    storeMessage(tk, userMsg);
-    storeMessage(tk, { role: "assistant", content: text });
+      if (!text) {
+        await ctx.reply("I couldn't generate a response. Please try again.", {
+          reply_to_message_id: ctx.message.message_id,
+        });
+        return;
+      }
 
-    await ctx.reply(text, { reply_to_message_id: ctx.message.message_id });
-  } catch (e: any) {
-    log.err(`Text handler failed: ${e?.message || e}`);
-    await ctx
-      .reply("Something went wrong, please try again.", {
-        reply_to_message_id: ctx.message.message_id,
-      })
-      .catch(() => {});
-  }
+      storeMessage(tk, userMsg);
+      storeMessage(tk, { role: "assistant", content: text });
+
+      await ctx.reply(text, { reply_to_message_id: ctx.message.message_id });
+    } catch (e: any) {
+      log.err(`Text handler failed: ${e?.message || e}`);
+      await ctx
+        .reply("Something went wrong, please try again.", {
+          reply_to_message_id: ctx.message.message_id,
+        })
+        .catch(() => {});
+    }
+  })();
 });
 
 // photo input: /image editing or vision analysis
@@ -351,39 +382,42 @@ bot.on("message:photo", async (ctx) => {
     if (!canRespond(tk)) return;
 
     const creds = getCredentials(ctx.chat.id);
-    log.info(`Image editing from ${ctx.chat.id}: ${prompt}`);
 
-    const actionInterval = setInterval(() => {
-      ctx.api.sendChatAction(ctx.chat.id, "upload_photo").catch(() => {});
-    }, 4000);
+    void (async () => {
+      log.info(`Image editing from ${ctx.chat.id}: ${prompt}`);
 
-    try {
-      await ctx.api.sendChatAction(ctx.chat.id, "upload_photo");
-      const file = await ctx.api.getFile(ctx.message.photo.pop()!.file_id);
-      const photoUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
-      const dataUrl = await toDataUrl(photoUrl);
-      const buffer = await generateImage(prompt, dataUrl, creds);
+      const actionInterval = setInterval(() => {
+        ctx.api.sendChatAction(ctx.chat.id, "upload_photo").catch(() => {});
+      }, 4000);
 
-      if (!buffer) {
-        await ctx.reply("No image was generated. Try a different prompt.", {
+      try {
+        await ctx.api.sendChatAction(ctx.chat.id, "upload_photo");
+        const file = await ctx.api.getFile(ctx.message.photo.pop()!.file_id);
+        const photoUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
+        const dataUrl = await toDataUrl(photoUrl);
+        const buffer = await generateImage(prompt, dataUrl, creds);
+
+        if (!buffer) {
+          await ctx.reply("No image was generated. Try a different prompt.", {
+            reply_to_message_id: ctx.message.message_id,
+          });
+          return;
+        }
+
+        await ctx.replyWithPhoto(new InputFile(buffer, "image.png"), {
           reply_to_message_id: ctx.message.message_id,
         });
-        return;
+      } catch (e: any) {
+        log.err(`Image editing failed: ${e?.message || e}`);
+        await ctx
+          .reply("Failed to edit the image. Please try again.", {
+            reply_to_message_id: ctx.message.message_id,
+          })
+          .catch(() => {});
+      } finally {
+        clearInterval(actionInterval);
       }
-
-      await ctx.replyWithPhoto(new InputFile(buffer, "image.png"), {
-        reply_to_message_id: ctx.message.message_id,
-      });
-    } catch (e: any) {
-      log.err(`Image editing failed: ${e?.message || e}`);
-      await ctx
-        .reply("Failed to edit the image. Please try again.", {
-          reply_to_message_id: ctx.message.message_id,
-        })
-        .catch(() => {});
-    } finally {
-      clearInterval(actionInterval);
-    }
+    })();
     return;
   }
 
@@ -402,47 +436,58 @@ bot.on("message:photo", async (ctx) => {
   if (!canRespond(tk)) return;
 
   const creds = getCredentials(ctx.chat.id);
-  log.info(`Photo from ${ctx.chat.id}`);
 
-  // Throttled streaming draft sender
-  let lastDraft = 0;
-  const onChunk = (snapshot: string) => {
-    const now = Date.now();
-    if (now - lastDraft < 300) return;
-    lastDraft = now;
-    (ctx as any).replyWithDraft?.(snapshot)?.catch(() => {});
-  };
+  void (async () => {
+    log.info(`Photo from ${ctx.chat.id}`);
 
-  try {
-    const file = await ctx.api.getFile(ctx.message.photo.pop()!.file_id);
-    const telegramUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
-    const dataUrl = await toDataUrl(telegramUrl);
+    // Throttled streaming draft sender
+    let lastDraft = 0;
+    const onChunk = (snapshot: string) => {
+      const now = Date.now();
+      if (now - lastDraft < 300) return;
+      lastDraft = now;
+      (ctx as any).replyWithDraft?.(snapshot)?.catch(() => {});
+    };
 
-    const tag = senderTag(ctx);
-    const parts: any[] = [];
-    if (captionRaw) parts.push({ type: "text", text: tag + captionRaw });
-    else if (tag) parts.push({ type: "text", text: tag.trim() });
-    parts.push({ type: "image_url", image_url: { url: dataUrl } });
+    try {
+      const file = await ctx.api.getFile(ctx.message.photo.pop()!.file_id);
+      const telegramUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
+      const dataUrl = await toDataUrl(telegramUrl);
 
-    const userMsg = { role: "user" as const, content: parts };
-    const history = memory.get(tk) || [];
-    const context = buildContext([...history, userMsg]);
+      const tag = senderTag(ctx);
+      const parts: any[] = [];
+      if (captionRaw) parts.push({ type: "text", text: tag + captionRaw });
+      else if (tag) parts.push({ type: "text", text: tag.trim() });
+      parts.push({ type: "image_url", image_url: { url: dataUrl } });
 
-    const text = cleanMd(await chat(ctx.chat.id, context, creds, onChunk));
+      const userMsg = { role: "user" as const, content: parts };
+      const history = memory.get(tk) || [];
+      const context = buildContext([...history, userMsg]);
 
-    storeMessage(tk, userMsg);
-    storeMessage(tk, { role: "assistant", content: text });
+      const text = cleanMd(await chat(ctx.chat.id, context, creds, onChunk));
 
-    await ctx.reply(text, { reply_to_message_id: ctx.message.message_id });
-  } catch (e: any) {
-    log.err(`Image handler failed: ${e?.message || e}`);
-    await ctx
-      .reply(
-        "Failed to process the image. Please try again or send text instead.",
-        { reply_to_message_id: ctx.message.message_id },
-      )
-      .catch(() => {});
-  }
+      if (!text) {
+        await ctx.reply(
+          "I couldn't generate a response for this image. Please try again.",
+          { reply_to_message_id: ctx.message.message_id },
+        );
+        return;
+      }
+
+      storeMessage(tk, userMsg);
+      storeMessage(tk, { role: "assistant", content: text });
+
+      await ctx.reply(text, { reply_to_message_id: ctx.message.message_id });
+    } catch (e: any) {
+      log.err(`Image handler failed: ${e?.message || e}`);
+      await ctx
+        .reply(
+          "Failed to process the image. Please try again or send text instead.",
+          { reply_to_message_id: ctx.message.message_id },
+        )
+        .catch(() => {});
+    }
+  })();
 });
 
 // Fetch model capabilities, then start

@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
+import { readFileSync, existsSync } from "fs";
+import { writeFile, mkdir, access } from "fs/promises";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 
@@ -25,43 +26,47 @@ if (existsSync(DATA_FILE)) {
   }
 }
 
-function persist() {
-  if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
+async function persist(): Promise<void> {
+  try {
+    await access(DATA_DIR);
+  } catch {
+    await mkdir(DATA_DIR, { recursive: true });
+  }
   const obj: Record<string, ChatApiConfig> = {};
   for (const [k, v] of store) obj[String(k)] = v;
-  writeFileSync(DATA_FILE, JSON.stringify(obj, null, 2));
+  await writeFile(DATA_FILE, JSON.stringify(obj, null, 2));
 }
 
 export function getChatConfig(chatId: number): ChatApiConfig {
   return store.get(chatId) ?? {};
 }
 
-export function setChatApiKey(chatId: number, apiKey: string): void {
+export async function setChatApiKey(chatId: number, apiKey: string): Promise<void> {
   const cfg = store.get(chatId) ?? {};
   cfg.apiKey = apiKey;
   store.set(chatId, cfg);
-  persist();
+  await persist();
 }
 
-export function setChatBaseUrl(chatId: number, baseUrl: string): void {
+export async function setChatBaseUrl(chatId: number, baseUrl: string): Promise<void> {
   const cfg = store.get(chatId) ?? {};
   cfg.baseUrl = baseUrl;
   store.set(chatId, cfg);
-  persist();
+  await persist();
 }
 
-export function resetChatApiKey(chatId: number): void {
+export async function resetChatApiKey(chatId: number): Promise<void> {
   const cfg = store.get(chatId);
   if (!cfg) return;
   delete cfg.apiKey;
   if (!cfg.apiKey && !cfg.baseUrl) store.delete(chatId);
-  persist();
+  await persist();
 }
 
-export function resetChatBaseUrl(chatId: number): void {
+export async function resetChatBaseUrl(chatId: number): Promise<void> {
   const cfg = store.get(chatId);
   if (!cfg) return;
   delete cfg.baseUrl;
   if (!cfg.apiKey && !cfg.baseUrl) store.delete(chatId);
-  persist();
+  await persist();
 }

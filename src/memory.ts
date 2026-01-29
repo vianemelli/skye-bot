@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
+import { readFileSync, existsSync } from "fs";
+import { writeFile, mkdir, access } from "fs/promises";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 
@@ -27,11 +28,15 @@ if (existsSync(DATA_FILE)) {
   }
 }
 
-function persist() {
-  if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
+async function persist(): Promise<void> {
+  try {
+    await access(DATA_DIR);
+  } catch {
+    await mkdir(DATA_DIR, { recursive: true });
+  }
   const obj: Record<string, MemoryEntry[]> = {};
   for (const [k, v] of store) obj[String(k)] = v;
-  writeFileSync(DATA_FILE, JSON.stringify(obj, null, 2));
+  await writeFile(DATA_FILE, JSON.stringify(obj, null, 2));
 }
 
 function generateId(): string {
@@ -42,7 +47,7 @@ export function getMemories(chatId: number): MemoryEntry[] {
   return store.get(chatId) ?? [];
 }
 
-export function addMemory(chatId: number, content: string): MemoryEntry {
+export async function addMemory(chatId: number, content: string): Promise<MemoryEntry> {
   const entry: MemoryEntry = {
     id: generateId(),
     content,
@@ -50,23 +55,23 @@ export function addMemory(chatId: number, content: string): MemoryEntry {
   };
   if (!store.has(chatId)) store.set(chatId, []);
   store.get(chatId)!.push(entry);
-  persist();
+  await persist();
   return entry;
 }
 
-export function deleteMemory(chatId: number, id: string): boolean {
+export async function deleteMemory(chatId: number, id: string): Promise<boolean> {
   const entries = store.get(chatId);
   if (!entries) return false;
   const idx = entries.findIndex((e) => e.id === id);
   if (idx === -1) return false;
   entries.splice(idx, 1);
-  persist();
+  await persist();
   return true;
 }
 
-export function clearMemories(chatId: number): void {
+export async function clearMemories(chatId: number): Promise<void> {
   store.delete(chatId);
-  persist();
+  await persist();
 }
 
 // OpenAI tool definitions
@@ -111,19 +116,19 @@ export const memoryTools = [
 ];
 
 // Execute a tool call and return the result string
-export function executeMemoryTool(
+export async function executeMemoryTool(
   chatId: number,
   toolCall: { function: { name: string; arguments: string } },
-): string {
+): Promise<string> {
   const args = JSON.parse(toolCall.function.arguments);
 
   switch (toolCall.function.name) {
     case "save_memory": {
-      const entry = addMemory(chatId, args.content);
+      const entry = await addMemory(chatId, args.content);
       return `Memory saved with ID ${entry.id}.`;
     }
     case "delete_memory": {
-      const ok = deleteMemory(chatId, args.memory_id);
+      const ok = await deleteMemory(chatId, args.memory_id);
       return ok
         ? `Memory ${args.memory_id} deleted.`
         : `Memory ${args.memory_id} not found.`;
