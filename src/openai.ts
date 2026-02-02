@@ -1,10 +1,5 @@
 import OpenAI from "openai";
-import {
-  BASE_URL,
-  MAX_COMPLETION_TOKENS,
-  MODEL,
-  OPENAI_KEY,
-} from "./config.js";
+import { BASE_URL, MAX_COMPLETION_TOKENS, MODEL, OPENAI_KEY } from "./config.js";
 import { log } from "./utils/log.js";
 
 export interface ApiCredentials {
@@ -66,9 +61,7 @@ export async function checkModelCapabilities(): Promise<void> {
     if (found) {
       const modality: string = found.architecture?.modality || "";
       _supportsImages = modality.toLowerCase().includes("image");
-      log.info(
-        `Model "${MODEL}" image support: ${_supportsImages} (modality: "${modality}")`,
-      );
+      log.info(`Model "${MODEL}" image support: ${_supportsImages} (modality: "${modality}")`);
     } else {
       log.warn(`Model "${MODEL}" not found in models list`);
     }
@@ -86,7 +79,11 @@ export function modelSupportsImages(): boolean | null {
 
 const IMAGE_MODEL = "google/gemini-3-pro-image-preview";
 
-export async function generateImage(prompt: string, imageUrl?: string, creds?: ApiCredentials): Promise<Buffer | null> {
+export async function generateImage(
+  prompt: string,
+  imageUrl?: string,
+  creds?: ApiCredentials
+): Promise<Buffer | null> {
   const { apiKey, baseUrl } = resolveCredentials(creds);
 
   const content: any = imageUrl

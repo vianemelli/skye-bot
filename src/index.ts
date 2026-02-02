@@ -11,24 +11,10 @@ import {
 import { log } from "./utils/log.js";
 import { buildContext } from "./contextBuilder.js";
 import { buildSystemMessage } from "./prompt.js";
-import {
-  getMemories,
-  clearMemories,
-  memoryTools,
-  executeMemoryTool,
-} from "./memory.js";
+import { getMemories, clearMemories, memoryTools, executeMemoryTool } from "./memory.js";
 import { getChatConfig } from "./chatConfig.js";
-import {
-  registerConfigHandlers,
-  handleWizardInput,
-  isInWizard,
-} from "./configCommand.js";
-import {
-  logMessage,
-  getChatContext,
-  summarizeChat,
-  type LogEntry,
-} from "./chatLog.js";
+import { registerConfigHandlers, handleWizardInput, isInWizard } from "./configCommand.js";
+import { logMessage, getChatContext, summarizeChat, type LogEntry } from "./chatLog.js";
 
 const bot = new Bot(BOT_TOKEN);
 
@@ -51,21 +37,16 @@ async function toDataUrl(url: string): Promise<string> {
     gif: "image/gif",
   };
   const ext = url.split(/[?#]/)[0].split(".").pop()?.toLowerCase() || "";
-  const headerMime = (res.headers.get("content-type") || "")
-    .split(";")[0]
-    .trim();
+  const headerMime = (res.headers.get("content-type") || "").split(";")[0].trim();
   const mime =
-    MIME_MAP[ext] ||
-    (headerMime.startsWith("image/") ? headerMime : null) ||
-    "image/jpeg";
+    MIME_MAP[ext] || (headerMime.startsWith("image/") ? headerMime : null) || "image/jpeg";
 
   return `data:${mime};base64,${buf.toString("base64")}`;
 }
 
 // Global error handler to prevent crashes
 bot.catch((err) => {
-  const msg =
-    (err as any)?.error?.message || (err as Error).message || "Unknown error";
+  const msg = (err as any)?.error?.message || (err as Error).message || "Unknown error";
   log.err(`Bot error: ${msg}`);
 });
 
@@ -102,8 +83,7 @@ function sanitizeContext(messages: any[]): any[] {
     if (!Array.isArray(msg.content)) return msg;
     const textParts = msg.content.filter((p: any) => p.type !== "image_url");
     if (textParts.length === 0) return { ...msg, content: "[image]" };
-    if (textParts.length === 1 && textParts[0].text)
-      return { ...msg, content: textParts[0].text };
+    if (textParts.length === 1 && textParts[0].text) return { ...msg, content: textParts[0].text };
     return { ...msg, content: textParts };
   });
 }
@@ -245,9 +225,7 @@ async function accessGate(ctx: Context, next: NextFunction) {
     const isDirected = !isGroup || isMention || isOurCommand;
 
     if (isDirected) {
-      await ctx.reply(
-        "You need to provide an API key to use this bot. Use /config to set one up.",
-      );
+      await ctx.reply("You need to provide an API key to use this bot. Use /config to set one up.");
     }
     return;
   }
@@ -279,7 +257,7 @@ async function chat(
   chatId: number,
   messages: any[],
   creds?: ApiCredentials,
-  onChunk?: (snapshot: string) => void,
+  onChunk?: (snapshot: string) => void
 ): Promise<string> {
   const memories = getMemories(chatId);
   const chatContext = getChatContext(chatId);
@@ -318,18 +296,14 @@ async function chat(
 bot.command("reset", async (ctx) => {
   const tk = threadKey(ctx.chat.id, ctx.message?.message_thread_id);
   memory.delete(tk);
-  await ctx.reply(
-    "Context reset. Memories are still saved — use /forget to clear them.",
-  );
+  await ctx.reply("Context reset. Memories are still saved — use /forget to clear them.");
 });
 
 // image generation (text-only prompt)
 bot.command("image", async (ctx) => {
   const prompt = ctx.match?.trim();
   if (!prompt) {
-    await ctx.reply(
-      "Provide a description after /image, e.g. /image a cat on the moon",
-    );
+    await ctx.reply("Provide a description after /image, e.g. /image a cat on the moon");
     return;
   }
 
@@ -451,10 +425,9 @@ bot.on("message:photo", async (ctx) => {
   if (imageMatch) {
     const prompt = imageMatch[1].trim();
     if (!prompt) {
-      await ctx.reply(
-        "Provide a description after /image, e.g. /image make it cartoon",
-        { reply_to_message_id: ctx.message.message_id },
-      );
+      await ctx.reply("Provide a description after /image, e.g. /image make it cartoon", {
+        reply_to_message_id: ctx.message.message_id,
+      });
       return;
     }
 
@@ -507,7 +480,7 @@ bot.on("message:photo", async (ctx) => {
   if (modelSupportsImages() === false) {
     await ctx.reply(
       "The current model does not support image input. Send text or switch to a vision-capable model.",
-      { reply_to_message_id: ctx.message.message_id },
+      { reply_to_message_id: ctx.message.message_id }
     );
     return;
   }
@@ -546,10 +519,9 @@ bot.on("message:photo", async (ctx) => {
       const text = cleanMd(await chat(ctx.chat.id, context, creds, onChunk));
 
       if (!text) {
-        await ctx.reply(
-          "I couldn't generate a response for this image. Please try again.",
-          { reply_to_message_id: ctx.message.message_id },
-        );
+        await ctx.reply("I couldn't generate a response for this image. Please try again.", {
+          reply_to_message_id: ctx.message.message_id,
+        });
         return;
       }
 
@@ -560,10 +532,9 @@ bot.on("message:photo", async (ctx) => {
     } catch (e: any) {
       log.err(`Image handler failed: ${e?.message || e}`);
       await ctx
-        .reply(
-          "Failed to process the image. Please try again or send text instead.",
-          { reply_to_message_id: ctx.message.message_id },
-        )
+        .reply("Failed to process the image. Please try again or send text instead.", {
+          reply_to_message_id: ctx.message.message_id,
+        })
         .catch(() => {});
     }
   })();

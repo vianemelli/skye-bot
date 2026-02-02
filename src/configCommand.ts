@@ -63,7 +63,7 @@ export function registerConfigHandlers(bot: Bot): void {
         await ctx.answerCallbackQuery();
         await ctx.editMessageText(
           "Send your API key as the next message.\n\n_You should delete your message afterwards for safety._",
-          { parse_mode: "Markdown" },
+          { parse_mode: "Markdown" }
         );
         break;
       }
@@ -72,7 +72,7 @@ export function registerConfigHandlers(bot: Bot): void {
         await ctx.answerCallbackQuery();
         await ctx.editMessageText(
           "Send the base URL as the next message (e.g. `https://openrouter.ai/api/v1`).",
-          { parse_mode: "Markdown" },
+          { parse_mode: "Markdown" }
         );
         break;
       }

@@ -1,19 +1,20 @@
-FROM node:22-alpine
+FROM oven/bun:alpine
 
 WORKDIR /app
 
 # Install deps first (better layer caching)
-COPY package.json package-lock.json ./
-RUN npm ci
+COPY package.json bun.lock* ./
+RUN bun install --frozen-lockfile
 
 # Copy source
-COPY tsconfig.json ./
+COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
 
 # Environment
 ENV NODE_ENV=production
 
-# Run the bot (tsx runs TypeScript directly)
-CMD ["npm", "run", "start"]
+# Build output for production
+RUN bun run build
 
-
+# Run the bot from compiled output
+CMD ["bun", "dist/index.js"]

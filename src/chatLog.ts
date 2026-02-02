@@ -60,11 +60,7 @@ export function formatLogEntry(entry: LogEntry): string {
 /**
  * Push a message to the buffer. Returns true if summarization is due.
  */
-export function logMessage(
-  chatId: number,
-  entry: LogEntry,
-  chatTitle?: string,
-): boolean {
+export function logMessage(chatId: number, entry: LogEntry, chatTitle?: string): boolean {
   if (chatTitle) chatTitles.set(chatId, chatTitle);
 
   if (!logs.has(chatId)) logs.set(chatId, []);
@@ -93,7 +89,7 @@ export function getOlderEntries(chatId: number): LogEntry[] {
  * Returns chat context for the system prompt, or undefined if no log exists.
  */
 export function getChatContext(
-  chatId: number,
+  chatId: number
 ): { chatTitle: string; summary: string; recentLog: string } | undefined {
   const buf = logs.get(chatId);
   if (!buf || buf.length === 0) return undefined;
@@ -110,10 +106,7 @@ export function getChatContext(
 /**
  * Store a summary and reset the counter. Persists to disk.
  */
-export async function setSummary(
-  chatId: number,
-  summary: string,
-): Promise<void> {
+export async function setSummary(chatId: number, summary: string): Promise<void> {
   summaries.set(chatId, summary);
   counters.set(chatId, 0);
   await persistSummaries();
@@ -122,10 +115,7 @@ export async function setSummary(
 /**
  * Summarize older entries via askSkye and store the result.
  */
-export async function summarizeChat(
-  chatId: number,
-  creds?: ApiCredentials,
-): Promise<void> {
+export async function summarizeChat(chatId: number, creds?: ApiCredentials): Promise<void> {
   const older = getOlderEntries(chatId);
   if (older.length === 0) {
     // Nothing to summarize, just reset counter

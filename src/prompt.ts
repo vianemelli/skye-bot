@@ -85,10 +85,7 @@ export interface ChatContext {
   recentLog: string;
 }
 
-export function buildSystemMessage(
-  memories: MemoryEntry[],
-  chatContext?: ChatContext,
-) {
+export function buildSystemMessage(memories: MemoryEntry[], chatContext?: ChatContext) {
   let content = SYSTEM_PROMPT;
 
   if (chatContext) {

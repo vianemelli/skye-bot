@@ -87,8 +87,7 @@ export const memoryTools = [
         properties: {
           content: {
             type: "string",
-            description:
-              "The information to remember, written as a clear factual statement.",
+            description: "The information to remember, written as a clear factual statement.",
           },
         },
         required: ["content"],
@@ -118,7 +117,7 @@ export const memoryTools = [
 // Execute a tool call and return the result string
 export async function executeMemoryTool(
   chatId: number,
-  toolCall: { function: { name: string; arguments: string } },
+  toolCall: { function: { name: string; arguments: string } }
 ): Promise<string> {
   const args = JSON.parse(toolCall.function.arguments);
 
@@ -129,9 +128,7 @@ export async function executeMemoryTool(
     }
     case "delete_memory": {
       const ok = await deleteMemory(chatId, args.memory_id);
-      return ok
-        ? `Memory ${args.memory_id} deleted.`
-        : `Memory ${args.memory_id} not found.`;
+      return ok ? `Memory ${args.memory_id} deleted.` : `Memory ${args.memory_id} not found.`;
     }
     default:
       return `Unknown tool: ${toolCall.function.name}`;
